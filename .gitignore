@@ -1,11 +1,3 @@
-# corrados
-.opencode/
-bin/
-flutter/
-gp5-wc/
-gp5_*
-tools/
-
 # Miscellaneous
 *.class
 *.log
