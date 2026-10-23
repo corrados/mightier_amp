@@ -26,6 +26,11 @@
 /// [gp5CellToDelayTimeMs]. Both grids are shared between the blocks and
 /// effects that use them.
 ///
+/// A fifth case, [Gp5CellFamily.rawCount], looks like a plain percentage but is
+/// not one: the smart harmony's high interval runs 0 to 24 semitones and the
+/// device stores the semitone count in the state itself, so the state is the
+/// value and must not be mapped onto 0-100. See [gp5DecodeRawCountCell].
+///
 /// Derived empirically from the device: every parameter of every effect in the
 /// mapped blocks was driven to a distinct position and the cell that moved was
 /// recorded, then a sweep across each full range confirmed the resulting
@@ -48,8 +53,8 @@ library gp5_param_cell;
 /// Block 8 (rvb) is on the same 8-byte stride as the others. Its cells do not
 /// all use the plain percentage encoding, so [gp5DecodeParamCell] returns null
 /// for the ones that do not and the caller leaves those parameters at their
-/// default. Block 9 (ns) is carried by the separate 148-byte end-of-patch
-/// frame.
+/// default. Block 9 (ns) is carried entirely by the separate 148-byte
+/// end-of-patch frame, so its base names part 4 directly.
 const Map<int, List<int>> gp5ParamCellBase = <int, List<int>>{
   0: <int>[1, 87], // nr
   1: <int>[1, 151], // pre
@@ -60,7 +65,11 @@ const Map<int, List<int>> gp5ParamCellBase = <int, List<int>>{
   6: <int>[3, 71], // mod
   7: <int>[3, 135], // dly
   8: <int>[3, 199], // rvb
-  9: <int>[4, 55], // ns
+  // Block 9 (ns). Measured on device by writing NAM 1's Gain and reading the
+  // patch back: the value landed in the cell at offset 63 while offset 55 held
+  // an all-zero field that never moved, so offset 55 is a block level field and
+  // Gain's own cell - the first parameter of the effect - is at 63.
+  9: <int>[4, 63], // ns
 };
 
 /// Whether a block's parameter is an eq gain band in dB rather than a plain
@@ -76,13 +85,37 @@ bool gp5IsDbBand(int block, int paramIndex) => block == 5 && paramIndex < 5;
 int gp5PatchPartLength(int part) => part == 4 ? 148 : 212;
 
 /// Some blocks run out of room in their own 212-byte part and continue at
-/// the start of the 148-byte final frame. Measured on device: block 8 keeps
-/// its first two cells in part 3 (offsets 199 and 207) and continues at part
-/// 4 offset 15, and block 9 is based at part 4 offset 55.
+/// the start of the 148-byte final frame. Block 8 keeps two cells in part 3
+/// (offsets 199 and 207) and continues at part 4 offset 15; every block is a
+/// 64-byte window of eight cells, so 199 and 207 are its first two slots and
+/// the remaining six spill into the final frame.
+///
+/// Block 9 is based in the final frame rather than continuing into it, so it has
+/// no tail entry: its own base in [gp5ParamCellBase] already points at part 4.
 const Map<int, List<int>> gp5ParamCellBaseTail = <int, List<int>>{
   8: [4, 15],
-  9: [4, 55],
 };
+
+/// The index of a parameter's cell inside its block's cell area.
+///
+/// This is always the parameter's wire address (`algId`), never its list
+/// position. Block 6 Bias Trem was measured with an untouched hole at algId 3
+/// and Bias at algId 4, so the storage is algId-indexed even where the ids are
+/// sparse, and block 8 follows the same rule across the part boundary:
+/// algId 0 is `3:199`, algId 1 is `3:207`, and algId 2 and up continue at
+/// `4:15` (so Decay algId 2 is `4:15`, Trail algId 3 is `4:23`, Trail algId 6
+/// is `4:47`).
+///
+/// A device sweep on every reverb measured exactly this: driving a parameter by
+/// its `algId` moved the cell at `8 * algId - 1` in the final frame (or
+/// `3:199`/`3:207` for algIds 0/1), independent of the parameter's list
+/// position. Reading by list position instead shifted Damp and Trail of the
+/// four-parameter reverbs one slot early, so Damp read an unused zero and Trail
+/// read Damp's value and snapped to On. An invalid `algId` (a sparse hole) is
+/// aliased by the pedal onto Mix's cell `3:199`; that is a device quirk of the
+/// write, not a second storage location.
+int gp5ParamCellIndex(int block, int listIndex, int wireAddress) =>
+    wireAddress;
 
 /// Number of parameter cells that still fit inside the block's own part.
 int gp5ParamCellsInOwnPart(int block) {
@@ -133,6 +166,12 @@ enum Gp5CellFamily {
 
   /// A delay time from 20 to 1000 ms, [gp5CellToDelayTimeMs].
   delayTimeMs,
+
+  /// A small non-negative integer count - the smart harmony's high interval in
+  /// semitones - stored on the plain percentage state grid, where the state is
+  /// the value rather than a position on a 0-100 scale.
+  /// [gp5DecodeRawCountCell].
+  rawCount,
 }
 
 /// The family a parameter is encoded in, from the range it declares.
@@ -148,8 +187,21 @@ Gp5CellFamily gp5CellFamily(double minVal, double maxVal,
   if (minVal < 0) return Gp5CellFamily.bipolar;
   if (minVal == 0.1 && maxVal == 10) return Gp5CellFamily.rateHz;
   if (minVal == 20 && maxVal >= 300) return Gp5CellFamily.delayTimeMs;
+  if (minVal == 0 && maxVal == 24) return Gp5CellFamily.rawCount;
   return Gp5CellFamily.percent;
 }
+
+/// Decodes a [rawCount] cell, or null when the bytes are not a state the device
+/// produces for one.
+///
+/// The cell is one of the plain percentage states, but the state is the count
+/// itself rather than a position on a 0-100 scale, so the lookup result is the
+/// value and must not be rescaled onto the parameter's range. Measured on
+/// device by sweeping the smart harmony's MHigh across its whole range: the
+/// pedal reported states 0, 2, 3, 7, 9, 12, 14, 15, 16, 17 and 19 while the
+/// parameter ran from 0 to 24 semitones, reaching ~19 at the top rather than
+/// the ~100 a normalised percentage would give.
+double? gp5DecodeRawCountCell(int cell) => gp5ParamCellToPercent[cell]?.toDouble();
 
 const Map<int, int> gp5ParamCellToPercent = <int, int>{
     0x00000000: 0,
@@ -520,5 +572,7 @@ double? gp5DecodeCell(Gp5CellFamily family, int cell) {
       return gp5CellToRateHz[cell];
     case Gp5CellFamily.delayTimeMs:
       return gp5CellToDelayTimeMs[cell];
+    case Gp5CellFamily.rawCount:
+      return gp5DecodeRawCountCell(cell);
   }
 }

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../NuxDevice.dart';
 import '../NuxFXID.dart';
 import '../effects/Processor.dart';
+import '../effects/gp5/GP5Effects.dart';
 import '../effects/gp5/GP5Processor.dart';
 import '../presets/Gp5Preset.dart';
 import '../value_formatters/SwitchFormatters.dart';
@@ -37,6 +38,11 @@ class Gp5Communication extends DeviceCommunication {
   Timer? _stageAdvanceTimer;
   int _currentPatch = -1;
   bool _uuidUnlocked = false;
+  // Track last local parameter writes to avoid readback overwriting
+  // values during fast slider drags (readback is needed after context changes
+  // like effect/preset switches, not for optimistic local writes)
+  final Map<String, int> _lastLocalParamWriteMs = <String, int>{};
+  static const int _localWriteSuppressMs = 1500;
 
   /// arms a single timer that advances the sync chain when the current stage
   /// stream goes idle (the pedal's stage-end control frames are frequently
@@ -200,6 +206,8 @@ class Gp5Communication extends DeviceCommunication {
   List<int> setChannel(int channel) {
     //the patch data replied by the device belongs to this channel
     _currentPatch = channel;
+    // context change - allow readback to apply
+    _lastLocalParamWriteMs.clear();
     //return the frame, the caller sends it (only once), then refresh the data
     _schedulePatchDataRefresh();
     return _changePatch(channel);
@@ -213,6 +221,7 @@ class Gp5Communication extends DeviceCommunication {
   @override
   List<int> requestPresetByIndex(int index) {
     _currentPatch = index;
+    _lastLocalParamWriteMs.clear();
     _schedulePatchDataRefresh();
     return _changePatch(index);
   }
@@ -291,6 +300,16 @@ class Gp5Communication extends DeviceCommunication {
     var block = preset.getFXIDFromSlot(slot).toInt();
     var command =
         '01000e11470${block}0000000${block}000000${fx.effectIdHex}';
+    if (kDebugMode) {
+      debugPrint('[GP5] SEND change-fx slot=$slot index=$index block=$block'
+          ' fx=${fx.name} id=${fx.effectIdHex} cmd=$command');
+    }
+    //A freshly changed algorithm drops parameter writes until the pedal has
+    //loaded its values from patch storage: on the pedal, Arena's Decay was dead
+    //until the patch was read back after the change-fx. Measured on device.
+    // Context change - clear local write suppressions so readback applies
+    _lastLocalParamWriteMs.clear();
+    _schedulePatchDataRefresh();
     device.deviceControl.sendBLEData(_frame(command));
   }
 
@@ -310,14 +329,31 @@ class Gp5Communication extends DeviceCommunication {
     var paramIndex = effect.parameters.indexOf(param);
     if (paramIndex < 0) return [];
 
+    //The reverb and delay blocks address their parameters by declared wire bytes
+    //instead of by their slot in the app's list (see GP5Effects.rvbEffects /
+    //dlyEffects): the pedal numbers them with the "algId" from the official
+    //metadata, which is sparse. Everywhere else the slot order is the address.
+    //resolveWireParam() owns that decision, including which parameters of a
+    //sparse block are not writable at all.
+    final wireParam =
+        GP5Effects.resolveWireParam(block, paramIndex, param.wireAddress);
+    if (wireParam == null) return [];
+
     double value = param.value;
     //master volume is scaled by the app master volume setting
     if (param.masterVolume) {
       value = value * (device.deviceControl.masterVolume * 0.01);
     }
 
+    //the GP5 stores every parameter (switches included) on the same 0-100
+    //percent grid, so an On switch is written as 100, not 1 (the model domain
+    //for switches is 0/1).
+    if (param.formatter is SwitchFormatter) {
+      value = (value * 100).clamp(0, 100);
+    }
+
     var blockHex = block.toRadixString(16).padLeft(2, '0');
-    var paramHex = paramIndex.toRadixString(16).padLeft(2, '0');
+    var paramHex = wireParam.toRadixString(16).padLeft(2, '0');
 
     final bd = ByteData(4)..setFloat32(0, value, Endian.little);
     final valueHex = StringBuffer();
@@ -326,8 +362,23 @@ class Gp5Communication extends DeviceCommunication {
           .write(bd.getUint8(i).toRadixString(16).padLeft(2, '0'));
     }
 
-    return _frame(
-        '01000e1148$blockHex' '000000$paramHex' '000000$valueHex');
+    if (kDebugMode) {
+      debugPrint('[GP5] SEND change-param block=$block index=$paramIndex'
+          ' wireParam=$wireParam value=$value '
+          'cmd=01000e1148$blockHex' '000000$paramHex' '000000$valueHex');
+    }
+
+    final frame =
+        _frame('01000e1148$blockHex' '000000$paramHex' '000000$valueHex');
+    //The pedal does not push a patch update of its own after a parameter
+    //write, but we do not want readback to overwrite optimistic values during
+    //fast drags - refresh is only needed to confirm writes after a short delay,
+    //and we suppress applying readback for recently written params. Measured
+    //on device: a full MHigh sweep produced change-param frames and no patch
+    //data at all.
+    _recordLocalParamWrite(block, wireParam);
+    _schedulePatchDataRefresh();
+    return frame;
   }
 
   @override
@@ -405,8 +456,8 @@ class Gp5Communication extends DeviceCommunication {
     if (data.length >= 80) {
       if (kDebugMode)
         debugPrint('[GP5] in len=${data.length} '
-            '${data.take(12).map((e) => e.toRadixString(16).padLeft(2, "0")).join(" ")}'
-            '… t=${DateTime.now().millisecondsSinceEpoch % 1000000}');
+            '${data.map((e) => e.toRadixString(16).padLeft(2, "0")).join(" ")} '
+            't=${DateTime.now().millisecondsSinceEpoch % 1000000}');
     } else {
       if (kDebugMode)
         debugPrint('[GP5] in len=${data.length} '
@@ -599,10 +650,31 @@ class Gp5Communication extends DeviceCommunication {
     return bd.getFloat32(0, Endian.little);
   }
 
+  String _paramKey(int block, int paramIndex) => '$block:$paramIndex';
+
+  void _recordLocalParamWrite(int block, int wireParam) {
+    _lastLocalParamWriteMs[_paramKey(block, wireParam)] =
+        DateTime.now().millisecondsSinceEpoch;
+  }
+
+  bool _shouldSuppressReadback(int block, int wireParam) {
+    final key = _paramKey(block, wireParam);
+    final last = _lastLocalParamWriteMs[key];
+    if (last == null) return false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - last > _localWriteSuppressMs) {
+      _lastLocalParamWriteMs.remove(key);
+      return false;
+    }
+    return true;
+  }
+
   /// applies a device push of the parameter at [block]/[paramIndex] to the
   /// selected effect of the given block on the current preset. [block] is a
-  /// data block id / FXID (3 = amp, 9 = ns/NAM). [paramIndex] is the index
-  /// within the selected effect's parameter list (matching [sendParameter]).
+  /// data block id / FXID (3 = amp, 9 = ns/NAM). [paramIndex] is the "algId" of
+  /// the parameter, the same number [sendParameter] writes, so it is resolved
+  /// back through [GP5Effects.resolveWireParam] rather than used as a list
+  /// position: on a sparse algorithm the two differ.
   void _applyChangeParameter(int block, int paramIndex, double value) {
     if (block < 0 || block > 9 || paramIndex < 0) return;
     var patch = _currentPatch >= 0 && _currentPatch < device.channelsCount
@@ -616,11 +688,30 @@ class Gp5Communication extends DeviceCommunication {
     var index = preset.getSelectedEffectForSlot(slot);
     if (index < 0 || index >= effects.length) return;
     var effect = effects[index];
-    if (paramIndex >= effect.parameters.length) return;
-    var param = effect.parameters[paramIndex];
+    //the pushed index is the wire byte, so find the parameter that is written
+    //to it instead of assuming list order
+    int? target;
+    for (int i = 0; i < effect.parameters.length; i++) {
+      if (GP5Effects.resolveWireParam(
+              block, i, effect.parameters[i].wireAddress) ==
+          paramIndex) {
+        target = i;
+        break;
+      }
+    }
+    if (target == null) return;
+    var param = effect.parameters[target];
+    // Device-pushed notifications reflect actual device state (e.g. after
+    // external changes); don't suppress them
     if (kDebugMode)
       debugPrint('[GP5] apply change-param block=$block'
           ' effect=${effect.name} param=${param.name} value=$value');
+    //The device reports a switch as the cell for percent 1 when it is On
+    //(0x0f030008), not as the top of the percent grid. Measured on Bright and
+    //on both Trail switches, so anything at or above 1 means On.
+    if (param.formatter is SwitchFormatter) {
+      value = value >= 1 ? 1.0 : 0.0;
+    }
     preset.setParameterValue(param, value, notify: false);
     device.deviceControl.forceNotifyListeners();
   }
@@ -664,11 +755,27 @@ class Gp5Communication extends DeviceCommunication {
       if (selected < 0 || selected >= effects.length) continue;
       final effect = effects[selected];
       for (int i = 0; i < effect.parameters.length; i++) {
+        final param = effect.parameters[i];
+        // the patch stores a parameter's cell at its wire address (`algId`),
+        // not at its list position: sparse effects leave holes between cells
+        // (Bias Trem Bias=4, RVB Trail=3/6, EV 51 PRES=6). Using the list index
+        // here read the hole and snapped sparse parameters back to default.
+        final wire =
+            GP5Effects.resolveWireParam(block, i, param.wireAddress) ?? i;
+        // the cell is at the wire address in every block, including block 8,
+        // whose cells simply continue into the final frame (see
+        // gp5ParamCellIndex)
+        final cellIndex = gp5ParamCellIndex(block, i, wire);
         // a cell can live in a later part than the block's own part, e.g.
         // block 8 continues in the 148-byte final frame
-        final pos = gp5ParamCellPosition(block, i);
+        final pos = gp5ParamCellPosition(block, cellIndex);
         if (pos == null || pos[0] != part) continue;
-        final param = effect.parameters[i];
+        if (_shouldSuppressReadback(block, wire)) {
+          // Don't overwrite values we just wrote locally during fast drags;
+          // readback is still useful for context changes (effect/preset switch)
+          // because those don't set local write timestamps in the same way
+          continue;
+        }
         final cell = gp5CellAt(b, pos[1]);
         final formatter = param.formatter;
         final family = formatter is GP5FloatFormatter
@@ -682,15 +789,18 @@ class Gp5Communication extends DeviceCommunication {
           continue;
         }
         if (formatter is SwitchFormatter) {
-          // a switch only ever reports one of the two ends of its range
-          param.value = value >= 50 ? 1.0 : 0.0;
+          // The device reports On as the cell for percent 1 (0x0f030008) rather
+          // than the top of the grid, so the threshold is 1 and not 50.
+          param.value = value >= 1 ? 1.0 : 0.0;
         } else if (family == Gp5CellFamily.percent) {
           // a percentage is a position on a 0-100 scale, not the value itself,
           // so it is mapped back onto the range the parameter declares
           param.value = MathEx.map(value, 0, 100, formatter.min.toDouble(),
               formatter.max.toDouble());
         } else {
-          // the other families' cells already carry the value in its own unit
+          // the other families' cells already carry the value in its own unit:
+          // rateHz, delayTimeMs, bipolar and rawCount all decode to the value
+          // itself, so nothing is rescaled onto the declared range
           param.value = value;
         }
       }

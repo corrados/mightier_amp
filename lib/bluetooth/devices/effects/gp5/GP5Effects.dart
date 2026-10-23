@@ -18,7 +18,10 @@ import 'GP5Processor.dart';
 class GP5Effects {
   static GP5Param _slider(String name, String handle, double def, double min,
       double max,
-      {int decimals = 0, String suffix = "", bool masterVolume = false}) {
+      {int decimals = 0,
+      String suffix = "",
+      bool masterVolume = false,
+      int? wireAddress}) {
     return GP5Param(
         name: name,
         handle: handle,
@@ -27,13 +30,37 @@ class GP5Effects {
         max: max,
         decimals: decimals,
         suffix: suffix,
-        masterVolume: masterVolume);
+        masterVolume: masterVolume,
+        wireAddress: wireAddress);
   }
 
-  static GP5Param _switch(String name, String handle, {double def = 0}) {
+  static GP5Param _switch(String name, String handle,
+      {double def = 0, int? wireAddress}) {
     return GP5Param(
-        name: name, handle: handle, def: def, min: 0, max: 1, isSwitch: true);
+        name: name,
+        handle: handle,
+        def: def,
+        min: 0,
+        max: 1,
+        isSwitch: true,
+        wireAddress: wireAddress);
   }
+
+  /// The wire byte a parameter of [block] at list position [paramIndex] is
+  /// written to, or null when it must not be written at all.
+  ///
+  /// The wire byte is the "algId" of the official metadata - the number the
+  /// official Valeton app drops into the change-parameter frame unchanged - and
+  /// those ids are 0-based, so a dense algorithm numbers its parameters
+  /// 0, 1, 2, ... A declared [wireAddress] always wins: it is the id of an
+  /// algorithm whose ids are sparse, e.g. the reverbs and delays, where the
+  /// pedal leaves holes in the block's parameter space.
+  ///
+  /// This app used to write [paramIndex] + 1, i.e. every parameter of every
+  /// block one byte too high. Confirmed on the pedal: on a delay, Mix (written
+  /// to byte 1) changed Time instead.
+  static int? resolveWireParam(int block, int paramIndex, int? wireAddress) =>
+      wireAddress ?? paramIndex;
 
   //============================= NR =============================
   static Gp5Processor noiseReduction() {
@@ -77,7 +104,7 @@ class GP5Effects {
         ]),
         Gp5Processor(1, "15000001", 6, "Touch Wah", [
           _slider("Depth", "depth", 50, 0, 100),
-          _slider("Rate", "rate", 5, 0.1, 10, decimals: 1),
+          _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("Vol", "vol", 50, 0, 100),
           _slider("Low", "low", 25, 0, 100),
           _slider("Q", "q", 70, 0, 100),
@@ -124,7 +151,7 @@ class GP5Effects {
           _slider("Vol", "vol", 50, 0, 100),
         ]),
         Gp5Processor(2, "29000003", 4, "Blues", [
-          _slider("Gain", "gain", 40, 0, 100),
+          _slider("Gain", "gain", 50, 0, 100),
           _slider("Vol", "vol", 50, 0, 100),
         ]),
         Gp5Processor(2, "30000003", 5, "Classic", [
@@ -138,11 +165,11 @@ class GP5Effects {
           _slider("Vol", "vol", 50, 0, 100),
         ]),
         Gp5Processor(2, "22000003", 7, "Fuzz", [
-          _slider("Fuzz", "fuzz", 40, 0, 100),
+          _slider("Fuzz", "fuzz", 50, 0, 100),
           _slider("Vol", "vol", 50, 0, 100),
         ]),
         Gp5Processor(2, "24000003", 8, "Muff Fuzz", [
-          _slider("Fuzz", "fuzz", 40, 0, 100),
+          _slider("Fuzz", "fuzz", 50, 0, 100),
           _slider("Vol", "vol", 50, 0, 100),
         ]),
         Gp5Processor(2, "40000003", 9, "Bass Distortion", [
@@ -245,7 +272,7 @@ class GP5Effects {
           _slider("Vol", "vol", 50, 0, 100, masterVolume: true),
           _slider("Bass", "bass", 50, 0, 100),
           _slider("Treble", "treble", 50, 0, 100),
-          _switch("Char", "char", def: 1),
+          _switch("Char", "char", def: 0),
         ]),
         Gp5Amplifier(3, "28000007", 12, "SUPDual OD", [
           _slider("Gain 1", "gain1", 30, 0, 100),
@@ -315,7 +342,9 @@ class GP5Effects {
           _slider("Bass", "bass", 50, 0, 100),
           _slider("Middle", "middle", 50, 0, 100),
           _slider("Treble", "treble", 50, 0, 100),
-          _slider("PRES", "pres", 50, 0, 100),
+          // module_data.json gives EV 51 algIds [0, 1, 2, 3, 4, 6]: PRES is the
+          // sixth knob but its wire address is 6, not the list slot 5.
+          _slider("PRES", "pres", 50, 0, 100, wireAddress: 6),
         ]),
         Gp5Amplifier(3, "59000007", 21, "Solo100 LD", [
           _slider("Gain", "gain", 50, 0, 100),
@@ -477,139 +506,176 @@ class GP5Effects {
 
   //============================= MOD =============================
   static List<Gp5Processor> modEffects() => [
-        Gp5Processor(6, "00000004", 0, "Chorus", [
+        Gp5Processor(6, "00000004", 0, "Aozora Chorus", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("Tone", "tone", 50, 0, 100),
         ]),
-        Gp5Processor(6, "08000004", 1, "Flanger", [
+        Gp5Processor(6, "08000004", 1, "Choruium B", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
-          _slider("Tone", "tone", 50, 0, 100),
+          _slider("Vol", "vol", 50, 0, 100),
         ]),
-        Gp5Processor(6, "11000004", 2, "Phaser", [
+        Gp5Processor(6, "11000004", 2, "Jetter", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("P.Delay", "p_delay", 50, 0, 100),
           _slider("F.Back", "f_back", 50, 0, 100),
         ]),
-        Gp5Processor(6, "13000004", 3, "Vibrato", [
+        Gp5Processor(6, "13000004", 3, "Jetter N", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("P.Delay", "p_delay", 50, 0, 100),
           _slider("F.Back", "f_back", 50, 0, 100),
         ]),
-        Gp5Processor(6, "19000004", 4, "Tremolo", [
+        Gp5Processor(6, "19000004", 4, "Phaser 90", [
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
         ]),
-        Gp5Processor(6, "1f000004", 5, "Rotary", [
+        Gp5Processor(6, "1f000004", 5, "Minivibe", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
         ]),
-        Gp5Processor(6, "15000004", 6, "Ring Modulator", [
+        Gp5Processor(6, "15000004", 6, "Pulser", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
         ]),
-        Gp5Processor(6, "17000004", 7, "Uni-V", [
-          _slider("Depth", "depth", 50, 0, 100),
-          _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
-          _slider("Vol", "vol", 50, 0, 100),
-        ]),
-        Gp5Processor(6, "21000004", 8, "Auto Pan", [
-          _slider("Depth", "depth", 50, 0, 100),
-          _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
-        ]),
-        Gp5Processor(6, "26000004", 9, "Detune", [
+        Gp5Processor(6, "17000004", 7, "Shiver", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("Vol", "vol", 50, 0, 100),
         ]),
-        Gp5Processor(6, "28000004", 10, "Vibro Pan", [
+        Gp5Processor(6, "21000004", 8, "Helicopter", [
+          _slider("Depth", "depth", 50, 0, 100),
+          _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
+        ]),
+        Gp5Processor(6, "26000004", 9, "Sine Trem", [
           _slider("Depth", "depth", 50, 0, 100),
           _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
           _slider("Vol", "vol", 50, 0, 100),
-          _slider("Bias", "bias", 50, 0, 100),
+        ]),
+        Gp5Processor(6, "28000004", 10, "Bias Trem", [
+          _slider("Depth", "depth", 50, 0, 100),
+          _slider("Rate", "rate", 0.5, 0.1, 10, decimals: 1),
+          _slider("Vol", "vol", 50, 0, 100),
+          // Bias is algId 4 in module_data.json, not the list index 3; writing
+          // 3 hit a slot the pedal does not use and the value snapped back.
+          _slider("Bias", "bias", 50, 0, 100, wireAddress: 4),
         ]),
       ];
 
   //============================= DLY =============================
-  static List<GP5Param> _delayParams(double time, double minMs, double maxMs) =>
+  //Same algId addressing as the rvb block: Mix 0, Time 1, F.Back 2, and Trail
+  //at algId 4 on the plain delays and algId 7 on Ring and Sweep, which skip two
+  //parameters. Confirmed on the pedal: writing Mix to byte 1 changed Time.
+  static List<GP5Param> _delayParams(double time, double minMs, double maxMs,
+          {int trailWire = 4, double fBack = 30}) =>
       [
-        _slider("Mix", "mix", 20, 0, 100),
+        _slider("Mix", "mix", 20, 0, 100, wireAddress: 0),
         _slider("Time (ms)", "time_ms", time, minMs, maxMs,
-            decimals: 0, suffix: " ms"),
-        _slider("F.Back", "f_back", 30, 0, 100),
-        _switch("Trail", "trail"),
+            decimals: 0, suffix: " ms", wireAddress: 1),
+        _slider("F.Back", "f_back", fBack, 0, 100, wireAddress: 2),
+        _switch("Trail", "trail", wireAddress: trailWire),
       ];
 
   static List<Gp5Processor> dlyEffects() => [
         Gp5Processor(
             7, "0000000b", 0, "Analog Delay", _delayParams(500, 20, 1000)),
         Gp5Processor(
-            7, "0100000b", 1, "Digital Delay", _delayParams(500, 20, 1000)),
+            7, "0100000b", 1, "Digital Delay", _delayParams(500, 20, 1000, fBack: 50)),
         Gp5Processor(
             7, "0500000b", 2, "Slap Delay", _delayParams(150, 20, 300)),
-        Gp5Processor(
-            7, "0d00000b", 3, "Tape Echo", _delayParams(500, 20, 1000)),
-        Gp5Processor(
-            7, "0200000b", 4, "Mod Delay", _delayParams(500, 20, 1000)),
+        Gp5Processor(7, "0d00000b", 3, "Tape Echo", _delayParams(500, 20, 1000)),
+        Gp5Processor(7, "0200000b", 4, "Mod Delay", _delayParams(500, 20, 1000)),
         Gp5Processor(
             7, "0b00000b", 5, "Reverse Delay", _delayParams(500, 20, 1000)),
         Gp5Processor(
             7, "1300000b", 6, "Lo-Fi Delay", _delayParams(500, 20, 1000)),
         Gp5Processor(7, "0900000b", 7, "Filter Delay", [
-          _slider("Mix", "mix", 20, 0, 100),
+          _slider("Mix", "mix", 20, 0, 100, wireAddress: 0),
           _slider("Time (ms)", "time_ms", 500, 20, 1000,
-              decimals: 0, suffix: " ms"),
-          _slider("F.Back", "f_back", 30, 0, 100),
-          _slider("R-Mix", "r_mix", 50, 0, 100),
-          _slider("Freq", "freq", 50, 0, 100),
-          _slider("Tone", "tone", 50, 0, 100),
-          _switch("Trail", "trail"),
+              decimals: 0, suffix: " ms", wireAddress: 1),
+          _slider("F.Back", "f_back", 30, 0, 100, wireAddress: 2),
+          _slider("R-Mix", "r_mix", 50, 0, 100, wireAddress: 3),
+          _slider("Freq", "freq", 50, 0, 100, wireAddress: 4),
+          _slider("Tone", "tone", 50, 0, 100, wireAddress: 5),
+          _switch("Trail", "trail", wireAddress: 7),
         ]),
         Gp5Processor(7, "0600000b", 8, "Sweep Delay", [
-          _slider("Mix", "mix", 20, 0, 100),
+          _slider("Mix", "mix", 20, 0, 100, wireAddress: 0),
           _slider("Time (ms)", "time_ms", 500, 20, 1000,
-              decimals: 0, suffix: " ms"),
-          _slider("F.Back", "f_back", 30, 0, 100),
-          _slider("S-Depth", "s_depth", 50, 0, 100),
-          _slider("S-Rate", "s_rate", 50, 0, 100),
-          _switch("Trail", "trail"),
+              decimals: 0, suffix: " ms", wireAddress: 1),
+          _slider("F.Back", "f_back", 30, 0, 100, wireAddress: 2),
+          _slider("S-Depth", "s_depth", 50, 0, 100, wireAddress: 3),
+          _slider("S-Rate", "s_rate", 50, 0, 100, wireAddress: 4),
+          _switch("Trail", "trail", wireAddress: 7),
         ]),
         Gp5Processor(
             7, "0400000b", 9, "Ping Pong Delay", _delayParams(500, 20, 500)),
       ];
 
   //============================= RVB =============================
-  static List<GP5Param> _rvbParams({bool damp = false}) => [
-        _slider("Mix", "mix", 30, 0, 100),
-        _slider("Decay", "decay", 50, 0, 100),
-        if (damp) _slider("Damp", "damp", 50, 0, 100),
-        _switch("Trail", "trail"),
+  //The rvb block does not address its parameters by their position in this
+  //list. The device uses the "algId" that the official Valeton app reads from
+  //its own metadata for every parameter (module_data.json -> alg[].algId), and
+  //the official app drops that number straight into the change-parameter frame
+  //with no arithmetic on it. Those ids are sparse per algorithm: the pedal
+  //keeps one parameter space per block and unused slots stay as holes, so
+  //"third parameter" and "byte 3" are not the same thing.
+  //
+  //Per algorithm, official algId (= wire byte):
+  //  0b00000c Studio/Air   Mix 0, Decay 2, Damp 4, Trail 6
+  //  0000000c Room         Mix 0, Decay 2, Trail 3
+  //  0100000c Hall         Mix 0, Decay 2, Trail 3
+  //  0200000c Church       Mix 0, Decay 2, Trail 3
+  //  1000000c Large Plate  Mix 0, Decay 2, Trail 6
+  //  0f00000c Small Plate  Mix 0, Decay 2, Damp 4, Trail 6
+  //  0400000c Spring       Mix 0, Decay 1, Trail 3
+  //  0600000c Northstar    Mix 0, Decay 1, Trail 2
+  //  0700000c Oceandeep    Mix 0, Decay 1, Trail 2
+  //  1500000c Cloud        Mix 0, Decay 2, Damp 4, Mod 5, Trail 6
+  //
+  //Every parameter carries its own address and none of them collide: Spring,
+  //Northstar and Oceandeep declare Decay with algId 1, which leaves their Trail
+  //switch (algId 3 / 2 / 2) writable - it had to be left alone back when Mix
+  //was written to byte 1 and took that Decay slot with it.
+  //
+  //Mix is byte 0. It was byte 1 for a while on the strength of a measurement
+  //that the delay block has since explained: byte 1 there is Time, so the
+  //addresses are the plain algIds with no +1, and on a reverb byte 1 is no
+  //parameter at all (or Decay, on Spring and friends).
+  static List<GP5Param> _rvbParams(
+          {int decayWire = 2,
+          bool damp = false,
+          double dampDef = 0,
+          int? modWire,
+          int? trailWire}) =>
+      [
+        _slider("Mix", "mix", 30, 0, 100, wireAddress: 0),
+        _slider("Decay", "decay", 50, 0, 100, wireAddress: decayWire),
+        if (damp) _slider("Damp", "damp", dampDef, 0, 100, wireAddress: 4),
+        if (modWire != null)
+          _slider("Mod", "mod", 50, 0, 100, wireAddress: modWire),
+        _switch("Trail", "trail", wireAddress: trailWire),
       ];
 
   static List<Gp5Processor> rvbEffects() => [
-        Gp5Processor(8, "0b00000c", 0, "Room", [
-          _slider("Mix", "mix", 30, 0, 100),
-          _slider("Decay", "decay", 50, 0, 100),
-          _slider("Damp", "damp", 0, 0, 100),
-          _switch("Trail", "trail"),
-        ]),
-        Gp5Processor(8, "0000000c", 1, "Hall", _rvbParams()),
-        Gp5Processor(8, "0100000c", 2, "Plate", _rvbParams()),
-        Gp5Processor(8, "0200000c", 3, "Church", _rvbParams()),
-        Gp5Processor(8, "1000000c", 4, "Spring", _rvbParams()),
-        Gp5Processor(8, "0f00000c", 5, "Studio", _rvbParams(damp: true)),
-        Gp5Processor(8, "0400000c", 6, "Shimmer", _rvbParams()),
-        Gp5Processor(8, "0600000c", 7, "Reverse", _rvbParams()),
-        Gp5Processor(8, "0700000c", 8, "Arena", _rvbParams()),
-        Gp5Processor(8, "1500000c", 9, "Mod Reverb", [
-          _slider("Mix", "mix", 30, 0, 100),
-          _slider("Decay", "decay", 50, 0, 100),
-          _slider("Damp", "damp", 0, 0, 100),
-          _slider("Mod", "mod", 50, 0, 100),
-          _switch("Trail", "trail"),
-        ]),
+        Gp5Processor(
+            8, "0b00000c", 0, "Studio", _rvbParams(damp: true, trailWire: 6)),
+        Gp5Processor(8, "0000000c", 1, "Room", _rvbParams(trailWire: 3)),
+        Gp5Processor(8, "0100000c", 2, "Hall", _rvbParams(trailWire: 3)),
+        Gp5Processor(8, "0200000c", 3, "Church", _rvbParams(trailWire: 3)),
+        Gp5Processor(8, "1000000c", 4, "Large Plate", _rvbParams(trailWire: 6)),
+        Gp5Processor(
+            8, "0f00000c", 5, "Small Plate",
+            _rvbParams(damp: true, dampDef: 50, trailWire: 6)),
+        Gp5Processor(8, "0400000c", 6, "Spring",
+            _rvbParams(decayWire: 1, trailWire: 3)),
+        Gp5Processor(8, "0600000c", 7, "Northstar",
+            _rvbParams(decayWire: 1, trailWire: 2)),
+        Gp5Processor(8, "0700000c", 8, "Oceandeep",
+            _rvbParams(decayWire: 1, trailWire: 2)),
+        Gp5Processor(8, "1500000c", 9, "Cloud",
+            _rvbParams(damp: true, modWire: 5, trailWire: 6)),
       ];
 
   //============================= NS (NAM snaptones) =============================

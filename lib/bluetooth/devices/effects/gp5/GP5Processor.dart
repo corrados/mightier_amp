@@ -29,6 +29,16 @@ class GP5Param {
   //this parameter tracks the master (patch) volume
   final bool masterVolume;
 
+  //the byte the GP-5's change-parameter command addresses for this parameter.
+  //Left null for parameters whose position in the effect's parameter list is
+  //the device's address (the normal case). The rvb and dly blocks declare it
+  //explicitly: the pedal numbers those parameters with the "algId" from the
+  //official metadata, which is sparse per algorithm, so the slot order is not
+  //the address there. A parameter of those blocks without a declared byte
+  //cannot be written over RAM at all - its slot is an alias of a neighbouring
+  //cell - and sendParameter skips it.
+  final int? wireAddress;
+
   GP5Param({
     required this.name,
     required this.handle,
@@ -39,6 +49,7 @@ class GP5Param {
     this.suffix = "",
     this.isSwitch = false,
     this.masterVolume = false,
+    this.wireAddress,
   });
 }
 
@@ -69,6 +80,7 @@ class Gp5Processor extends Processor {
         midiCC: 100 + blockId * 8 + i,
         devicePresetIndex: 20 + blockId * 12 + i,
         masterVolume: p.masterVolume,
+        wireAddress: p.wireAddress,
       ));
     }
   }
